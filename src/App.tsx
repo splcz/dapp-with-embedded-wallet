@@ -15,6 +15,12 @@ function App() {
             领取 USDC 测试币 
             <a href="https://faucet.circle.com" target="_blank" className="text-blue-400 hover:text-blue-300 ml-1">https://faucet.circle.com</a> 
           </p>
+          <p className="text-orange-400 text-sm whitespace-pre-wrap">
+            {'Demo 运行在 Ethereum Sepolia 网络'}
+          </p>
+          <p className="text-slate-400 text-sm whitespace-pre-wrap">
+            {'使用 EIP-2612 Permit + transferFrom 执行转账\nGas 由 Alchemy 赞助'}
+          </p>
         </div>
 
         {/* Main Card */}
