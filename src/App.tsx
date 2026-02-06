@@ -9,10 +9,11 @@ function App() {
         {/* Header */}
         <div className="text-center mb-10">
           <h1 className="text-4xl font-bold bg-linear-to-r from-blue-400 via-purple-400 to-pink-400 bg-clip-text text-transparent mb-3">
-            Gas-Free USDC Transfer
+            Alchemy Relayer Demo
           </h1>
           <p className="text-slate-400 text-sm">
-            连接钱包即可转账，无需 ETH 支付 Gas
+            领取 USDC 测试币 
+            <a href="https://faucet.circle.com" target="_blank" className="text-blue-400 hover:text-blue-300 ml-1">https://faucet.circle.com</a> 
           </p>
         </div>
 
