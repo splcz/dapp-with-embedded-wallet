@@ -2,11 +2,17 @@ import { useState, useCallback, useEffect } from 'react'
 import { usePublicClient, useWalletClient } from 'wagmi'
 import { useSmartWallet } from '../hooks/useSmartWallet'
 import { type Address, type Hex, parseUnits, formatUnits, encodeFunctionData } from 'viem'
+import {
+  prepareCalls,
+  sendPreparedCalls,
+  getCallsStatus,
+  type PrepareCallsParams,
+  type UserOperationItem,
+  type SignedUserOperation,
+} from '../utils/alchemyApi'
 
-// Sepolia USDC 合约地址
 const USDC_ADDRESS = '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238' as Address
 
-// USDC ABI
 const USDC_ABI = [
   {
     name: 'transferFrom',
@@ -46,10 +52,12 @@ const USDC_ABI = [
   },
 ] as const
 
+const SEPOLIA_CHAIN_ID = '0xaa36a7' // 11155111
+
 export function UsdcTransfer() {
   const { data: walletClient } = useWalletClient()
   const publicClient = usePublicClient()
-  const { smartClient, scaAddress, eoaAddress, isScaDeployed, refreshScaStatus } = useSmartWallet()
+  const { scaAddress, eoaAddress, isScaDeployed, refreshScaStatus } = useSmartWallet()
 
   const [recipient, setRecipient] = useState('0xd1122C8c941fE716C8b0C57b832c90acB4401a05')
   const [amount, setAmount] = useState('1')
@@ -59,7 +67,6 @@ export function UsdcTransfer() {
   const [txStatus, setTxStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle')
   const [txHash, setTxHash] = useState<Hex | null>(null)
 
-  // 查询 EOA 的 USDC 余额
   useEffect(() => {
     if (!publicClient || !eoaAddress) return
 
@@ -82,9 +89,67 @@ export function UsdcTransfer() {
     return () => clearInterval(interval)
   }, [publicClient, eoaAddress])
 
-  // 从 EOA 转账 USDC（使用 Permit 签名 + SCA 执行）
+  const signUserOperation = useCallback(async (
+    item: UserOperationItem,
+  ): Promise<SignedUserOperation> => {
+    if (!walletClient) throw new Error('Wallet not connected')
+
+    const { signatureRequest } = item
+    let signature: Hex
+
+    if (signatureRequest.type === 'personal_sign') {
+      const rawData = signatureRequest.data as { raw: Hex }
+      signature = await walletClient.signMessage({
+        message: { raw: rawData.raw as `0x${string}` },
+      })
+    } else if (signatureRequest.type === 'eth_signTypedData_v4') {
+      const typedData = signatureRequest.data as {
+        domain: Record<string, unknown>
+        types: Record<string, Array<{ name: string; type: string }>>
+        primaryType: string
+        message: Record<string, unknown>
+      }
+      signature = await walletClient.signTypedData({
+        domain: typedData.domain,
+        types: typedData.types,
+        primaryType: typedData.primaryType,
+        message: typedData.message,
+      })
+    } else {
+      throw new Error(`Unsupported signature type: ${signatureRequest.type}`)
+    }
+
+    return {
+      type: item.type,
+      data: item.data as unknown as Record<string, unknown>,
+      chainId: item.chainId,
+      signature: { type: 'secp256k1', data: signature },
+    }
+  }, [walletClient])
+
+  const waitForConfirmation = useCallback(async (callId: string): Promise<Hex> => {
+    const MAX_POLLS = 60
+    for (let i = 0; i < MAX_POLLS; i++) {
+      const status = await getCallsStatus(callId)
+
+      if (status.status === 200) {
+        if (!status.receipts?.length || status.receipts[0].status !== '0x1') {
+          throw new Error('Transaction reverted')
+        }
+        return status.receipts[0].transactionHash
+      }
+
+      if (status.status >= 400) {
+        throw new Error(`Transaction failed with status ${status.status}`)
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 2000))
+    }
+    throw new Error('Transaction timed out')
+  }, [])
+
   const transferUsdc = useCallback(async () => {
-    if (!smartClient || !scaAddress || !walletClient || !publicClient || !eoaAddress || !recipient || !amount) return
+    if (!walletClient || !scaAddress || !publicClient || !eoaAddress || !recipient || !amount) return
 
     setLoading(true)
     setTxStatus('sending')
@@ -93,7 +158,7 @@ export function UsdcTransfer() {
 
     try {
       const transferAmount = parseUnits(amount, 6)
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600) // 1 小时后过期
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600)
 
       // 1. 获取 EOA 在 USDC 合约的 nonce
       const nonce = await publicClient.readContract({
@@ -107,7 +172,7 @@ export function UsdcTransfer() {
       const domain = {
         name: 'USDC',
         version: '2',
-        chainId: 11155111, // Sepolia
+        chainId: 11155111,
         verifyingContract: USDC_ADDRESS,
       }
 
@@ -123,24 +188,23 @@ export function UsdcTransfer() {
 
       const message = {
         owner: eoaAddress,
-        spender: scaAddress, // SCA 作为被授权方
+        spender: scaAddress,
         value: transferAmount,
         nonce: nonce,
         deadline: deadline,
       }
 
-      // 3. EOA 签名 Permit（免 Gas！）
-      const signature = await walletClient.signTypedData({
+      // 3. EOA 签名 Permit（免 Gas）
+      const permitSignature = await walletClient.signTypedData({
         domain,
         types,
         primaryType: 'Permit',
         message,
       })
 
-      // 解析签名
-      const r = signature.slice(0, 66) as Hex
-      const s = ('0x' + signature.slice(66, 130)) as Hex
-      const v = parseInt(signature.slice(130, 132), 16)
+      const r = permitSignature.slice(0, 66) as Hex
+      const s = ('0x' + permitSignature.slice(66, 130)) as Hex
+      const v = parseInt(permitSignature.slice(130, 132), 16)
 
       // 4. 编码 permit 调用
       const permitData = encodeFunctionData({
@@ -156,41 +220,36 @@ export function UsdcTransfer() {
         args: [eoaAddress, recipient as Address, transferAmount],
       })
 
-      // 6. SCA 批量执行 permit + transferFrom，Gas 由 Paymaster 代付
-      // 注意：如果 SCA 未部署，这一步会自动部署 SCA
-      const result = await smartClient.sendCalls({
-        from: scaAddress,
+      // 6. wallet_prepareCalls（从 SCA 发起，批量执行 permit + transferFrom）
+      const prepareParams: PrepareCallsParams = {
         calls: [
-          {
-            to: USDC_ADDRESS,
-            data: permitData,
-            value: '0x0' as Hex,
-          },
-          {
-            to: USDC_ADDRESS,
-            data: transferFromData,
-            value: '0x0' as Hex,
-          },
+          { to: USDC_ADDRESS, data: permitData, value: '0x0' },
+          { to: USDC_ADDRESS, data: transferFromData, value: '0x0' },
         ],
+        from: scaAddress,
+        chainId: SEPOLIA_CHAIN_ID,
         capabilities: {
           paymasterService: {
             policyId: import.meta.env.VITE_ALCHEMY_POLICY_ID,
           },
         },
-      })
-
-      const callId = result.preparedCallIds[0]
-      if (!callId) throw new Error('Missing call id')
-
-      const { receipts } = await smartClient.waitForCallsStatus({ id: callId })
-      if (!receipts?.length || receipts[0]?.status !== 'success') {
-        throw new Error('Transaction failed')
       }
 
-      setTxHash(receipts[0].transactionHash)
-      setTxStatus('success')
+      const prepared = await prepareCalls(prepareParams)
 
-      // 刷新 SCA 部署状态
+      // 7. 签名 UserOperation
+      const signed = await signUserOperation(prepared)
+
+      // 8. wallet_sendPreparedCalls
+      const result = await sendPreparedCalls(signed)
+      const callId = result.preparedCallIds[0] ?? result.id
+      if (!callId) throw new Error('Missing call id')
+
+      // 9. 轮询 wallet_getCallsStatus
+      const hash = await waitForConfirmation(callId)
+
+      setTxHash(hash)
+      setTxStatus('success')
       await refreshScaStatus()
     } catch (err) {
       console.error('Transfer failed:', err)
@@ -199,7 +258,7 @@ export function UsdcTransfer() {
     } finally {
       setLoading(false)
     }
-  }, [smartClient, scaAddress, walletClient, publicClient, eoaAddress, recipient, amount, refreshScaStatus])
+  }, [walletClient, scaAddress, publicClient, eoaAddress, recipient, amount, signUserOperation, waitForConfirmation, refreshScaStatus])
 
   if (!eoaAddress) {
     return null
@@ -220,7 +279,6 @@ export function UsdcTransfer() {
       <div className="space-y-4">
         {/* 账户信息 */}
         <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700/50 space-y-3">
-          {/* EOA 信息 */}
           <div>
             <div className="flex items-center gap-2 mb-1">
               <div className="w-2 h-2 rounded-full bg-green-500" />
@@ -230,7 +288,6 @@ export function UsdcTransfer() {
             <p className="text-lg text-white font-semibold mt-1">{eoaBalance} USDC</p>
           </div>
 
-          {/* SCA 信息 */}
           <div className="pt-3 border-t border-slate-700/50">
             <div className="flex items-center gap-2 mb-1">
               <div className={`w-2 h-2 rounded-full ${isScaDeployed ? 'bg-blue-500' : 'bg-yellow-500'}`} />

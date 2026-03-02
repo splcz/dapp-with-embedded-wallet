@@ -10,9 +10,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@aa-sdk/core": "^4.83.2",
-    "@account-kit/infra": "^4.83.2",
-    "@account-kit/wallet-client": "^4.83.2",
     "@tanstack/react-query": "^5.90.20",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

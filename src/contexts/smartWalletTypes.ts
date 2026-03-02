@@ -1,9 +1,7 @@
 import { createContext } from 'react'
-import { type SmartWalletClient } from '@account-kit/wallet-client'
 import { type Address } from 'viem'
 
 export interface SmartWalletContextType {
-  smartClient: SmartWalletClient | null
   scaAddress: Address | null
   isScaDeployed: boolean
   isInitializing: boolean
