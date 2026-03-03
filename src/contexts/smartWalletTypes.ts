@@ -3,7 +3,7 @@ import { type Address } from 'viem'
 
 export interface SmartWalletContextType {
   scaAddress: Address | null
-  isScaDeployed: boolean
+  isDelegated: boolean
   isInitializing: boolean
   error: string | null
   eoaAddress: Address | undefined

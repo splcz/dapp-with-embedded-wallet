@@ -1,26 +1,32 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useMemo } from 'react'
 import { usePublicClient, useConnection } from 'wagmi'
 import { getWalletClient } from 'wagmi/actions'
 import { config } from '../wagmi'
 import { useSmartWallet } from '../hooks/useSmartWallet'
 import { type Address, type Hex, parseUnits, formatUnits, encodeFunctionData, decodeFunctionData } from 'viem'
+import { hashAuthorization } from 'viem/utils'
 import {
   prepareCalls,
   sendPreparedCalls,
   getCallsStatus,
+  isArrayResult,
+  isAuthorizationItem,
   type PrepareCallsParams,
+  type PrepareCallsResult,
   type UserOperationItem,
-  type SignedUserOperation,
+  type AuthorizationItem,
+  type SignedItem,
+  type SignedArrayPayload,
+  type SendPreparedCallsParams,
 } from '../utils/alchemyApi'
 
 const USDC_ADDRESS = '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238' as Address
 
 const USDC_ABI = [
   {
-    name: 'transferFrom',
+    name: 'transfer',
     type: 'function',
     inputs: [
-      { name: 'from', type: 'address' },
       { name: 'to', type: 'address' },
       { name: 'amount', type: 'uint256' },
     ],
@@ -32,29 +38,9 @@ const USDC_ABI = [
     inputs: [{ name: 'account', type: 'address' }],
     outputs: [{ type: 'uint256' }],
   },
-  {
-    name: 'nonces',
-    type: 'function',
-    inputs: [{ name: 'owner', type: 'address' }],
-    outputs: [{ type: 'uint256' }],
-  },
-  {
-    name: 'permit',
-    type: 'function',
-    inputs: [
-      { name: 'owner', type: 'address' },
-      { name: 'spender', type: 'address' },
-      { name: 'value', type: 'uint256' },
-      { name: 'deadline', type: 'uint256' },
-      { name: 'v', type: 'uint8' },
-      { name: 'r', type: 'bytes32' },
-      { name: 's', type: 'bytes32' },
-    ],
-    outputs: [],
-  },
 ] as const
 
-const SEPOLIA_CHAIN_ID = '0xaa36a7' // 11155111
+const SEPOLIA_CHAIN_ID = '0xaa36a7'
 
 function shortenAddress(addr: string) {
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`
@@ -75,21 +61,12 @@ function decodeUsdcCall(call: { to: string; data?: string; value?: string }): De
   try {
     const decoded = decodeFunctionData({ abi: USDC_ABI, data: call.data as Hex })
 
-    if (decoded.functionName === 'permit') {
-      const [owner, spender, value] = decoded.args as [string, string, bigint]
+    if (decoded.functionName === 'transfer') {
+      const [to, amount] = decoded.args as [string, bigint]
       return {
         to: call.to,
-        functionName: 'permit',
-        description: `授权 ${shortenAddress(spender)} 花费 ${formatUnits(value, 6)} USDC（签署者: ${shortenAddress(owner)}）`,
-      }
-    }
-
-    if (decoded.functionName === 'transferFrom') {
-      const [from, to, amount] = decoded.args as [string, string, bigint]
-      return {
-        to: call.to,
-        functionName: 'transferFrom',
-        description: `从 ${shortenAddress(from)} 转 ${formatUnits(amount, 6)} USDC 到 ${shortenAddress(to)}`,
+        functionName: 'transfer',
+        description: `转 ${formatUnits(amount, 6)} USDC 到 ${shortenAddress(to)}`,
       }
     }
 
@@ -111,7 +88,7 @@ function decodeUsdcCall(call: { to: string; data?: string; value?: string }): De
 export function UsdcTransfer() {
   const { connector } = useConnection()
   const publicClient = usePublicClient()
-  const { scaAddress, eoaAddress, isScaDeployed, refreshScaStatus } = useSmartWallet()
+  const { eoaAddress, isDelegated, refreshScaStatus } = useSmartWallet()
 
   const [recipient, setRecipient] = useState('0xd1122C8c941fE716C8b0C57b832c90acB4401a05')
   const [amount, setAmount] = useState('1')
@@ -120,7 +97,17 @@ export function UsdcTransfer() {
   const [error, setError] = useState('')
   const [txStatus, setTxStatus] = useState<'idle' | 'preparing' | 'confirming' | 'sending' | 'success' | 'error'>('idle')
   const [txHash, setTxHash] = useState<Hex | null>(null)
-  const [pendingOp, setPendingOp] = useState<UserOperationItem | null>(null)
+  const [pendingResult, setPendingResult] = useState<PrepareCallsResult | null>(null)
+
+  const { authItem, userOpItem } = useMemo(() => {
+    if (!pendingResult) return { authItem: null, userOpItem: null }
+    if (isArrayResult(pendingResult)) {
+      const auth = pendingResult.data.find(isAuthorizationItem) as AuthorizationItem | undefined
+      const op = pendingResult.data.find(item => !isAuthorizationItem(item)) as UserOperationItem | undefined
+      return { authItem: auth ?? null, userOpItem: op ?? null }
+    }
+    return { authItem: null, userOpItem: pendingResult }
+  }, [pendingResult])
 
   useEffect(() => {
     if (!publicClient || !eoaAddress) return
@@ -144,18 +131,86 @@ export function UsdcTransfer() {
     return () => clearInterval(interval)
   }, [publicClient, eoaAddress])
 
+  const signAuthorizationItem = useCallback(async (
+    item: AuthorizationItem,
+  ): Promise<SignedItem> => {
+    const contractAddress = item.data.address as Address
+    const chainId = parseInt(item.chainId, 16)
+    const nonce = parseInt(item.data.nonce, 16)
+
+    const computedHash = hashAuthorization({ contractAddress, chainId, nonce })
+    if (computedHash !== item.signatureRequest.rawPayload) {
+      console.warn('[7702] Authorization hash mismatch!', {
+        computed: computedHash,
+        rawPayload: item.signatureRequest.rawPayload,
+      })
+      throw new Error('Authorization hash mismatch - delegation address may not be trusted')
+    }
+
+    console.log('[7702] Signing authorization for delegation to:', contractAddress)
+
+    const provider = await connector?.getProvider() as { request: (args: { method: string; params: unknown[] }) => Promise<string> }
+    if (!provider) throw new Error('No wallet provider')
+
+    let signature: string
+    let lastError: unknown
+
+    const rpcMethods = ['wallet_signAuthorization', 'eth_signAuthorization']
+    for (const method of rpcMethods) {
+      try {
+        console.log(`[7702] Trying ${method}...`)
+        signature = await provider.request({
+          method,
+          params: [{ chainId: item.chainId, address: contractAddress, nonce: item.data.nonce }],
+        })
+        console.log(`[7702] ${method} succeeded`)
+        return {
+          type: item.type,
+          data: item.data as unknown as Record<string, unknown>,
+          chainId: item.chainId,
+          signature: { type: 'secp256k1', data: signature },
+        }
+      } catch (e) {
+        console.log(`[7702] ${method} failed:`, e)
+        lastError = e
+      }
+    }
+
+    try {
+      console.log('[7702] Trying eth_sign (raw hash)...')
+      signature = await provider.request({
+        method: 'eth_sign',
+        params: [eoaAddress, computedHash],
+      })
+      console.log('[7702] eth_sign succeeded')
+      return {
+        type: item.type,
+        data: item.data as unknown as Record<string, unknown>,
+        chainId: item.chainId,
+        signature: { type: 'secp256k1', data: signature },
+      }
+    } catch (e) {
+      console.log('[7702] eth_sign failed:', e)
+      lastError = e
+    }
+
+    throw new Error(
+      `无法签名 EIP-7702 授权。请确保钱包支持 EIP-7702，或在 MetaMask 高级设置中启用 eth_sign。原始错误: ${lastError}`
+    )
+  }, [connector, eoaAddress])
+
   const signUserOperation = useCallback(async (
     item: UserOperationItem,
-  ): Promise<SignedUserOperation> => {
+  ): Promise<SignedItem> => {
     const wc = await getWalletClient(config, { connector })
 
     const { signatureRequest } = item
     let signature: Hex
 
-    if (signatureRequest.type === 'personal_sign') {
-      const rawData = signatureRequest.data as { raw: Hex }
+    if (signatureRequest.type === 'personal_sign' || signatureRequest.type === 'eip7702Auth') {
+      const raw = (signatureRequest.data as { raw?: Hex })?.raw ?? signatureRequest.rawPayload
       signature = await wc.signMessage({
-        message: { raw: rawData.raw as `0x${string}` },
+        message: { raw: raw as `0x${string}` },
       })
     } else if (signatureRequest.type === 'eth_signTypedData_v4') {
       const typedData = signatureRequest.data as {
@@ -203,82 +258,27 @@ export function UsdcTransfer() {
     throw new Error('Transaction timed out')
   }, [])
 
-  // Step A: Permit sign + prepareCalls -> show confirmation UI
   const prepareTransfer = useCallback(async () => {
-    if (!scaAddress || !publicClient || !eoaAddress || !recipient || !amount || !connector) return
+    if (!eoaAddress || !recipient || !amount || !connector) return
 
     setLoading(true)
     setTxStatus('preparing')
     setError('')
     setTxHash(null)
-    setPendingOp(null)
+    setPendingResult(null)
 
     try {
-      const walletClient = await getWalletClient(config, { connector })
       const transferAmount = parseUnits(amount, 6)
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600)
 
-      const nonce = await publicClient.readContract({
-        address: USDC_ADDRESS,
+      const transferData = encodeFunctionData({
         abi: USDC_ABI,
-        functionName: 'nonces',
-        args: [eoaAddress],
-      }) as bigint
-
-      const domain = {
-        name: 'USDC',
-        version: '2',
-        chainId: 11155111,
-        verifyingContract: USDC_ADDRESS,
-      }
-
-      const types = {
-        Permit: [
-          { name: 'owner', type: 'address' },
-          { name: 'spender', type: 'address' },
-          { name: 'value', type: 'uint256' },
-          { name: 'nonce', type: 'uint256' },
-          { name: 'deadline', type: 'uint256' },
-        ],
-      }
-
-      const message = {
-        owner: eoaAddress,
-        spender: scaAddress,
-        value: transferAmount,
-        nonce: nonce,
-        deadline: deadline,
-      }
-
-      const permitSignature = await walletClient.signTypedData({
-        domain,
-        types,
-        primaryType: 'Permit',
-        message,
-      })
-
-      const r = permitSignature.slice(0, 66) as Hex
-      const s = ('0x' + permitSignature.slice(66, 130)) as Hex
-      const v = parseInt(permitSignature.slice(130, 132), 16)
-
-      const permitData = encodeFunctionData({
-        abi: USDC_ABI,
-        functionName: 'permit',
-        args: [eoaAddress, scaAddress, transferAmount, deadline, v, r, s],
-      })
-
-      const transferFromData = encodeFunctionData({
-        abi: USDC_ABI,
-        functionName: 'transferFrom',
-        args: [eoaAddress, recipient as Address, transferAmount],
+        functionName: 'transfer',
+        args: [recipient as Address, transferAmount],
       })
 
       const prepareParams: PrepareCallsParams = {
-        calls: [
-          { to: USDC_ADDRESS, data: permitData, value: '0x0' },
-          { to: USDC_ADDRESS, data: transferFromData, value: '0x0' },
-        ],
-        from: scaAddress,
+        calls: [{ to: USDC_ADDRESS, data: transferData, value: '0x0' }],
+        from: eoaAddress,
         chainId: SEPOLIA_CHAIN_ID,
         capabilities: {
           paymasterService: {
@@ -287,8 +287,9 @@ export function UsdcTransfer() {
         },
       }
 
-      const prepared = await prepareCalls(prepareParams)
-      setPendingOp(prepared)
+      const result = await prepareCalls(prepareParams)
+      console.log('[7702] prepareCalls result:', result)
+      setPendingResult(result)
       setTxStatus('confirming')
     } catch (err) {
       console.error('Prepare failed:', err)
@@ -297,19 +298,33 @@ export function UsdcTransfer() {
     } finally {
       setLoading(false)
     }
-  }, [connector, scaAddress, publicClient, eoaAddress, recipient, amount])
+  }, [connector, eoaAddress, recipient, amount])
 
-  // Step B: sign UserOp + send + poll
   const confirmAndSend = useCallback(async () => {
-    if (!pendingOp) return
+    if (!pendingResult) return
 
     setLoading(true)
     setTxStatus('sending')
     setError('')
 
     try {
-      const signed = await signUserOperation(pendingOp)
-      const result = await sendPreparedCalls(signed)
+      let sendParams: SendPreparedCallsParams
+
+      if (isArrayResult(pendingResult)) {
+        const signedItems: SignedItem[] = []
+        for (const item of pendingResult.data) {
+          if (isAuthorizationItem(item)) {
+            signedItems.push(await signAuthorizationItem(item))
+          } else {
+            signedItems.push(await signUserOperation(item as UserOperationItem))
+          }
+        }
+        sendParams = { type: 'array', data: signedItems } satisfies SignedArrayPayload
+      } else {
+        sendParams = await signUserOperation(pendingResult)
+      }
+
+      const result = await sendPreparedCalls(sendParams)
       const callId = result.preparedCallIds[0] ?? result.id
       if (!callId) throw new Error('Missing call id')
 
@@ -317,7 +332,7 @@ export function UsdcTransfer() {
 
       setTxHash(hash)
       setTxStatus('success')
-      setPendingOp(null)
+      setPendingResult(null)
       await refreshScaStatus()
     } catch (err) {
       console.error('Send failed:', err)
@@ -326,16 +341,16 @@ export function UsdcTransfer() {
     } finally {
       setLoading(false)
     }
-  }, [pendingOp, signUserOperation, waitForConfirmation, refreshScaStatus])
+  }, [pendingResult, signAuthorizationItem, signUserOperation, waitForConfirmation, refreshScaStatus])
 
   const cancelConfirm = useCallback(() => {
-    setPendingOp(null)
+    setPendingResult(null)
     setTxStatus('idle')
     setError('')
   }, [])
 
-  // Decode details.calls for the confirmation UI
-  const decodedCalls = pendingOp?.details?.data.calls.map(decodeUsdcCall) ?? []
+  const decodedCalls = userOpItem?.details?.data.calls.map(decodeUsdcCall) ?? []
+  const needsAuthorization = !!authItem
 
   return (
     <div className="p-6">
@@ -345,7 +360,7 @@ export function UsdcTransfer() {
         </div>
         <div>
           <h2 className="text-lg font-semibold text-white">USDC 转账</h2>
-          <p className="text-xs text-slate-500">从 EOA 转账，Gas 由 Alchemy 赞助</p>
+          <p className="text-xs text-slate-500">EIP-7702 Smart EOA，Gas 由 Alchemy 赞助</p>
         </div>
       </div>
 
@@ -355,37 +370,36 @@ export function UsdcTransfer() {
         </div>
       ) : (<>
       <div className="space-y-4">
-        {/* 账户信息 */}
         <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700/50 space-y-3">
           <div>
             <div className="flex items-center gap-2 mb-1">
-              <div className="w-2 h-2 rounded-full bg-green-500" />
-              <p className="text-xs text-slate-400">EOA 账户</p>
+              <div className={`w-2 h-2 rounded-full ${isDelegated ? 'bg-green-500' : 'bg-yellow-500'}`} />
+              <p className="text-xs text-slate-400">
+                Smart EOA (7702) {isDelegated ? '' : '- 首次交易将自动委托'}
+              </p>
             </div>
             <p className="text-sm text-white font-mono break-all">{eoaAddress}</p>
             <p className="text-lg text-white font-semibold mt-1">{eoaBalance} USDC</p>
           </div>
-
-          <div className="pt-3 border-t border-slate-700/50">
-            <div className="flex items-center gap-2 mb-1">
-              <div className={`w-2 h-2 rounded-full ${isScaDeployed ? 'bg-blue-500' : 'bg-yellow-500'}`} />
-              <p className="text-xs text-slate-400">
-                智能账户 (SCA) {isScaDeployed ? '' : '- 将在首次交易时自动创建'}
-              </p>
-            </div>
-            {scaAddress && (
-              <p className="text-sm text-slate-300 font-mono break-all">{scaAddress}</p>
-            )}
-          </div>
         </div>
 
-        {/* Confirmation UI - shown when pendingOp exists */}
-        {txStatus === 'confirming' && pendingOp ? (
+        {txStatus === 'confirming' && pendingResult ? (
           <div className="space-y-4">
             <div className="p-4 bg-amber-500/10 rounded-xl border border-amber-500/30 space-y-3">
               <h3 className="text-sm font-semibold text-amber-400">确认交易详情</h3>
 
-              {/* Decoded calls */}
+              {needsAuthorization && (
+                <div className="p-3 bg-purple-500/10 rounded-lg border border-purple-500/30">
+                  <p className="text-xs text-purple-400 font-medium mb-1">EIP-7702 委托授权</p>
+                  <p className="text-xs text-slate-300">
+                    将 EOA 委托给智能合约: {shortenAddress(authItem!.data.address)}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1">
+                    此操作仅需执行一次，后续交易只需单次签名
+                  </p>
+                </div>
+              )}
+
               <div className="space-y-2">
                 <p className="text-xs text-slate-400 font-medium">执行操作：</p>
                 {decodedCalls.map((call, i) => (
@@ -412,38 +426,41 @@ export function UsdcTransfer() {
                 ))}
               </div>
 
-              {/* Gas / Fee info */}
-              <div className="pt-2 border-t border-amber-500/20">
-                <div className="flex justify-between text-xs">
-                  <span className="text-slate-400">Gas 费用</span>
-                  <span className={pendingOp.feePayment?.sponsored ? 'text-green-400' : 'text-amber-400'}>
-                    {pendingOp.feePayment?.sponsored ? '已赞助（免费）' : '用户支付'}
-                  </span>
+              {userOpItem?.feePayment && (
+                <div className="pt-2 border-t border-amber-500/20">
+                  <div className="flex justify-between text-xs">
+                    <span className="text-slate-400">Gas 费用</span>
+                    <span className={userOpItem.feePayment.sponsored ? 'text-green-400' : 'text-amber-400'}>
+                      {userOpItem.feePayment.sponsored ? '已赞助（免费）' : '用户支付'}
+                    </span>
+                  </div>
                 </div>
-              </div>
+              )}
 
-              {/* UserOp metadata */}
               <div className="pt-2 border-t border-amber-500/20 space-y-1">
                 <div className="flex justify-between text-xs">
-                  <span className="text-slate-400">UserOp 类型</span>
-                  <span className="text-slate-300 font-mono">{pendingOp.type}</span>
+                  <span className="text-slate-400">签名次数</span>
+                  <span className="text-slate-300">
+                    {needsAuthorization ? '2 次（委托 + UserOp）' : '1 次（仅 UserOp）'}
+                  </span>
                 </div>
-                <div className="flex justify-between text-xs">
-                  <span className="text-slate-400">签名方式</span>
-                  <span className="text-slate-300 font-mono">{pendingOp.signatureRequest.type}</span>
-                </div>
-                {pendingOp.details?.data.hash && (
+                {userOpItem && (
+                  <div className="flex justify-between text-xs">
+                    <span className="text-slate-400">UserOp 类型</span>
+                    <span className="text-slate-300 font-mono">{userOpItem.type}</span>
+                  </div>
+                )}
+                {userOpItem?.details?.data.hash && (
                   <div className="flex justify-between text-xs">
                     <span className="text-slate-400 shrink-0">UserOp Hash</span>
                     <span className="text-slate-500 font-mono truncate ml-2">
-                      {pendingOp.details.data.hash}
+                      {userOpItem.details.data.hash}
                     </span>
                   </div>
                 )}
               </div>
             </div>
 
-            {/* Confirm / Cancel buttons */}
             <div className="flex gap-3">
               <button
                 onClick={cancelConfirm}
@@ -473,7 +490,6 @@ export function UsdcTransfer() {
           </div>
         ) : (
           <>
-            {/* 目标地址 */}
             <div>
               <label className="block text-xs text-slate-400 mb-1">接收地址</label>
               <input
@@ -485,7 +501,6 @@ export function UsdcTransfer() {
               />
             </div>
 
-            {/* 转账金额 */}
             <div>
               <label className="block text-xs text-slate-400 mb-1">转账金额 (USDC)</label>
               <input
@@ -499,10 +514,9 @@ export function UsdcTransfer() {
               />
             </div>
 
-            {/* 转账按钮 */}
             <button
               onClick={prepareTransfer}
-              disabled={loading || !amount || parseFloat(amount) <= 0 || parseFloat(eoaBalance) < parseFloat(amount) || !scaAddress}
+              disabled={loading || !amount || parseFloat(amount) <= 0 || parseFloat(eoaBalance) < parseFloat(amount)}
               className="w-full py-3 bg-linear-to-r from-green-600 to-emerald-600 hover:from-green-500 hover:to-emerald-500 disabled:from-slate-700 disabled:to-slate-700 disabled:text-slate-500 text-white font-medium rounded-xl transition-all"
             >
               {loading ? (
@@ -511,25 +525,23 @@ export function UsdcTransfer() {
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                   </svg>
-                  {txStatus === 'preparing' ? '准备交易...' : !isScaDeployed ? '创建智能账户并转账...' : '转账中...'}
+                  准备交易...
                 </span>
               ) : (
                 `转账 ${amount} USDC`
               )}
             </button>
 
-            {/* 说明 */}
             <div className="p-3 bg-blue-500/10 rounded-xl border border-blue-500/30">
               <p className="text-xs text-blue-400">
-                <strong>工作原理：</strong> EOA 签名 Permit 授权（免 Gas），SCA 执行 permit + transferFrom。
-                Gas 由 Alchemy 代付，USDC 直接从 EOA 扣除。
-                {!isScaDeployed && ' 首次转账会自动创建智能账户。'}
+                <strong>工作原理：</strong> 使用 EIP-7702 将 EOA 升级为 Smart EOA，USDC 直接从当前地址转出。
+                Gas 由 Alchemy 代付。
+                {!isDelegated && ' 首次交易需要额外一次委托签名（仅一次）。'}
               </p>
             </div>
           </>
         )}
 
-        {/* 交易结果 */}
         {txStatus === 'success' && txHash && (
           <div className="p-4 bg-green-500/10 rounded-xl border border-green-500/30">
             <div className="flex items-center gap-2 mb-2">

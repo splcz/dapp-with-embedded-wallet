@@ -19,7 +19,7 @@ function App() {
             {'Demo 运行在 Ethereum Sepolia 网络'}
           </p>
           <p className="text-slate-400 text-sm whitespace-pre-wrap">
-            {'使用 EIP-2612 Permit + transferFrom 执行转账\nGas 由 Alchemy 赞助'}
+            {'使用 EIP-7702 Smart EOA 执行转账\nGas 由 Alchemy 赞助'}
           </p>
         </div>
 

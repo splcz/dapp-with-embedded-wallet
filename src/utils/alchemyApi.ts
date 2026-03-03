@@ -23,20 +23,6 @@ async function alchemyRpc<T = unknown>(method: string, params: unknown[]): Promi
   return data.result as T
 }
 
-// --- wallet_requestAccount ---
-
-export interface RequestAccountResult {
-  accountAddress: string
-  id: string
-}
-
-export async function requestAccount(signerAddress: string) {
-  return alchemyRpc<RequestAccountResult>('wallet_requestAccount', [{
-    signerAddress,
-    creationHint: { accountType: 'sma-b' },
-  }])
-}
-
 // --- wallet_prepareCalls ---
 
 export interface PrepareCallsParams {
@@ -53,7 +39,7 @@ export interface UserOperationItem {
   data: Record<string, string>
   chainId: string
   signatureRequest: {
-    type: 'personal_sign' | 'eth_signTypedData_v4'
+    type: 'personal_sign' | 'eth_signTypedData_v4' | 'eip7702Auth'
     data: { raw: Hex } | Record<string, unknown>
     rawPayload: Hex
   }
@@ -67,13 +53,38 @@ export interface UserOperationItem {
   }
 }
 
+export interface AuthorizationItem {
+  type: 'authorization'
+  data: Record<string, string>
+  chainId: string
+  signatureRequest: {
+    type: string
+    rawPayload: Hex
+  }
+}
+
+export interface ArrayPrepareResult {
+  type: 'array'
+  data: Array<AuthorizationItem | UserOperationItem>
+}
+
+export type PrepareCallsResult = UserOperationItem | ArrayPrepareResult
+
 export async function prepareCalls(params: PrepareCallsParams) {
-  return alchemyRpc<UserOperationItem>('wallet_prepareCalls', [params])
+  return alchemyRpc<PrepareCallsResult>('wallet_prepareCalls', [params])
+}
+
+export function isArrayResult(result: PrepareCallsResult): result is ArrayPrepareResult {
+  return result.type === 'array'
+}
+
+export function isAuthorizationItem(item: AuthorizationItem | UserOperationItem): item is AuthorizationItem {
+  return item.type === 'authorization'
 }
 
 // --- wallet_sendPreparedCalls ---
 
-export interface SignedUserOperation {
+export interface SignedItem {
   type: string
   data: Record<string, unknown>
   chainId: string
@@ -83,12 +94,19 @@ export interface SignedUserOperation {
   }
 }
 
+export interface SignedArrayPayload {
+  type: 'array'
+  data: SignedItem[]
+}
+
+export type SendPreparedCallsParams = SignedItem | SignedArrayPayload
+
 export interface SendPreparedCallsResult {
   id: string
   preparedCallIds: string[]
 }
 
-export async function sendPreparedCalls(params: SignedUserOperation) {
+export async function sendPreparedCalls(params: SendPreparedCallsParams) {
   return alchemyRpc<SendPreparedCallsResult>('wallet_sendPreparedCalls', [params])
 }
 

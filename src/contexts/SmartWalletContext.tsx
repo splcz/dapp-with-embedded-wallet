@@ -2,18 +2,18 @@ import { useState, useEffect, useCallback, type ReactNode } from 'react'
 import { useConnection, usePublicClient } from 'wagmi'
 import { type Address } from 'viem'
 import { SmartWalletContext } from './smartWalletTypes'
-import { requestAccount } from '../utils/alchemyApi'
 
 export function SmartWalletProvider({ children }: { children: ReactNode }) {
   const { address: eoaAddress, isConnected } = useConnection()
   const publicClient = usePublicClient()
 
-  const [scaAddress, setScaAddress] = useState<Address | null>(null)
-  const [isScaDeployed, setIsScaDeployed] = useState(false)
+  const [isDelegated, setIsDelegated] = useState(false)
   const [isInitializing, setIsInitializing] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const checkScaDeployed = useCallback(async (address: Address) => {
+  const scaAddress = eoaAddress as Address | undefined ?? null
+
+  const checkDelegation = useCallback(async (address: Address) => {
     if (!publicClient) return false
     try {
       const code = await publicClient.getCode({ address })
@@ -24,17 +24,16 @@ export function SmartWalletProvider({ children }: { children: ReactNode }) {
   }, [publicClient])
 
   const refreshScaStatus = useCallback(async () => {
-    if (!scaAddress) return
-    const deployed = await checkScaDeployed(scaAddress)
-    setIsScaDeployed(deployed)
-  }, [scaAddress, checkScaDeployed])
+    if (!eoaAddress) return
+    const delegated = await checkDelegation(eoaAddress)
+    setIsDelegated(delegated)
+  }, [eoaAddress, checkDelegation])
 
   useEffect(() => {
-    console.log('[SmartWallet] useEffect triggered:', { isConnected, eoaAddress, hasPublicClient: !!publicClient })
+    console.log('[SmartWallet 7702] useEffect triggered:', { isConnected, eoaAddress, hasPublicClient: !!publicClient })
 
     if (!eoaAddress) {
-      setScaAddress(null)
-      setIsScaDeployed(false)
+      setIsDelegated(false)
       setError(null)
       return
     }
@@ -45,15 +44,10 @@ export function SmartWalletProvider({ children }: { children: ReactNode }) {
       setIsInitializing(true)
       setError(null)
       try {
-        console.log('[SmartWallet] calling requestAccount for', eoaAddress)
-        const result = await requestAccount(eoaAddress)
-        if (cancelled) return
-        const address = result.accountAddress as Address
-        setScaAddress(address)
-
-        if (publicClient) {
-          const code = await publicClient.getCode({ address })
-          if (!cancelled) setIsScaDeployed(!!code && code !== '0x')
+        const delegated = await checkDelegation(eoaAddress)
+        if (!cancelled) {
+          setIsDelegated(delegated)
+          console.log('[SmartWallet 7702] delegation status:', delegated)
         }
       } catch (err) {
         if (cancelled) return
@@ -66,13 +60,13 @@ export function SmartWalletProvider({ children }: { children: ReactNode }) {
 
     init()
     return () => { cancelled = true }
-  }, [isConnected, eoaAddress, publicClient])
+  }, [isConnected, eoaAddress, publicClient, checkDelegation])
 
   return (
     <SmartWalletContext.Provider
       value={{
         scaAddress,
-        isScaDeployed,
+        isDelegated,
         isInitializing,
         error,
         eoaAddress,
