@@ -58,6 +58,13 @@ export interface UserOperationItem {
     rawPayload: Hex
   }
   feePayment?: { sponsored: boolean; tokenAddress: string; maxAmount: string }
+  details?: {
+    type: string
+    data: {
+      hash: string
+      calls: Array<{ to: string; data?: string; value?: string }>
+    }
+  }
 }
 
 export async function prepareCalls(params: PrepareCallsParams) {

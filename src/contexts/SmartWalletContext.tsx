@@ -1,19 +1,17 @@
 import { useState, useEffect, useCallback, type ReactNode } from 'react'
-import { useWalletClient, usePublicClient } from 'wagmi'
+import { useConnection, usePublicClient } from 'wagmi'
 import { type Address } from 'viem'
 import { SmartWalletContext } from './smartWalletTypes'
 import { requestAccount } from '../utils/alchemyApi'
 
 export function SmartWalletProvider({ children }: { children: ReactNode }) {
-  const { data: walletClient } = useWalletClient()
+  const { address: eoaAddress, isConnected } = useConnection()
   const publicClient = usePublicClient()
 
   const [scaAddress, setScaAddress] = useState<Address | null>(null)
   const [isScaDeployed, setIsScaDeployed] = useState(false)
   const [isInitializing, setIsInitializing] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  const eoaAddress = walletClient?.account?.address
 
   const checkScaDeployed = useCallback(async (address: Address) => {
     if (!publicClient) return false
@@ -32,33 +30,43 @@ export function SmartWalletProvider({ children }: { children: ReactNode }) {
   }, [scaAddress, checkScaDeployed])
 
   useEffect(() => {
-    if (!walletClient || !eoaAddress) {
+    console.log('[SmartWallet] useEffect triggered:', { isConnected, eoaAddress, hasPublicClient: !!publicClient })
+
+    if (!eoaAddress) {
       setScaAddress(null)
       setIsScaDeployed(false)
       setError(null)
       return
     }
 
+    let cancelled = false
+
     const init = async () => {
       setIsInitializing(true)
       setError(null)
       try {
+        console.log('[SmartWallet] calling requestAccount for', eoaAddress)
         const result = await requestAccount(eoaAddress)
+        if (cancelled) return
         const address = result.accountAddress as Address
         setScaAddress(address)
 
-        const deployed = await checkScaDeployed(address)
-        setIsScaDeployed(deployed)
+        if (publicClient) {
+          const code = await publicClient.getCode({ address })
+          if (!cancelled) setIsScaDeployed(!!code && code !== '0x')
+        }
       } catch (err) {
+        if (cancelled) return
         console.error('Smart wallet init failed:', err)
         setError(err instanceof Error ? err.message : '初始化失败')
       } finally {
-        setIsInitializing(false)
+        if (!cancelled) setIsInitializing(false)
       }
     }
 
     init()
-  }, [walletClient, eoaAddress, checkScaDeployed])
+    return () => { cancelled = true }
+  }, [isConnected, eoaAddress, publicClient])
 
   return (
     <SmartWalletContext.Provider
