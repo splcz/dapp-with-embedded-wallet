@@ -152,14 +152,13 @@ export function UsdcTransfer() {
     const provider = await connector?.getProvider() as { request: (args: { method: string; params: unknown[] }) => Promise<string> }
     if (!provider) throw new Error('No wallet provider')
 
-    let signature: string
     let lastError: unknown
 
     const rpcMethods = ['wallet_signAuthorization', 'eth_signAuthorization']
     for (const method of rpcMethods) {
       try {
         console.log(`[7702] Trying ${method}...`)
-        signature = await provider.request({
+        const signature = await provider.request({
           method,
           params: [{ chainId: item.chainId, address: contractAddress, nonce: item.data.nonce }],
         })
@@ -176,28 +175,10 @@ export function UsdcTransfer() {
       }
     }
 
-    try {
-      console.log('[7702] Trying eth_sign (raw hash)...')
-      signature = await provider.request({
-        method: 'eth_sign',
-        params: [eoaAddress, computedHash],
-      })
-      console.log('[7702] eth_sign succeeded')
-      return {
-        type: item.type,
-        data: item.data as unknown as Record<string, unknown>,
-        chainId: item.chainId,
-        signature: { type: 'secp256k1', data: signature },
-      }
-    } catch (e) {
-      console.log('[7702] eth_sign failed:', e)
-      lastError = e
-    }
-
     throw new Error(
-      `无法签名 EIP-7702 授权。请确保钱包支持 EIP-7702，或在 MetaMask 高级设置中启用 eth_sign。原始错误: ${lastError}`
+      `当前钱包不支持签名 EIP-7702 授权。MetaMask 不支持签名第三方 EIP-7702 授权，请使用支持 signAuthorization 的钱包（如 Coinbase Wallet 或嵌入式钱包）。原始错误: ${lastError}`
     )
-  }, [connector, eoaAddress])
+  }, [connector])
 
   const signUserOperation = useCallback(async (
     item: UserOperationItem,
