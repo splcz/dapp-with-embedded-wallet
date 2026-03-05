@@ -1,8 +1,8 @@
 import { type Address } from 'viem'
 
-export const USDT_ADDRESS = '0xdAC17F958D2ee523a2206206994597C13D831ec7' as Address
+export const NATIVE_TOKEN_ADDRESS = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'
 
-export const USDT_ABI = [
+const ERC20_ABI = [
   {
     name: 'balanceOf',
     type: 'function',
@@ -38,3 +38,30 @@ export const USDT_ABI = [
     outputs: [],
   },
 ] as const
+
+export interface SwapToken {
+  symbol: string
+  address: string
+  decimals: number
+  isNative: boolean
+  abi: typeof ERC20_ABI
+  requiresZeroApprove?: boolean
+}
+
+export const SWAP_TOKENS: SwapToken[] = [
+  {
+    symbol: 'USDT',
+    address: '0xdAC17F958D2ee523a2206206994597C13D831ec7' as Address,
+    decimals: 6,
+    isNative: false,
+    abi: ERC20_ABI,
+    requiresZeroApprove: true,
+  },
+  {
+    symbol: 'ETH',
+    address: NATIVE_TOKEN_ADDRESS,
+    decimals: 18,
+    isNative: true,
+    abi: ERC20_ABI,
+  },
+]

@@ -1,6 +1,6 @@
 import { WalletConnect } from './components/WalletConnect'
 import { UsdcTransfer } from './components/UsdcTransfer'
-import { UsdtSwapTransfer } from './components/UsdtSwapTransfer'
+import { SwapTransfer } from './components/SwapTransfer'
 import { SmartWalletProvider } from './contexts/SmartWalletContext'
 
 function App() {
@@ -34,8 +34,8 @@ function App() {
           {/* Divider */}
           <div className="h-px bg-linear-to-r from-transparent via-slate-700 to-transparent" />
 
-          {/* Step 3: USDT Swap & Transfer */}
-          <UsdtSwapTransfer />
+          {/* Step 3: Swap → USDC Transfer */}
+          <SwapTransfer />
         </div>
 
         {/* Footer */}
