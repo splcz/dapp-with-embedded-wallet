@@ -1,5 +1,6 @@
-import { WalletConnect } from './components/WalletConnect'
-import { UsdcTransfer } from './components/UsdcTransfer'
+import { WalletConnect } from './components/wallet/WalletConnect'
+import { TokenTransfer } from './components/transfer/TokenTransfer'
+import { USDC, USDT } from './constants/tokens'
 import { SmartWalletProvider } from './contexts/SmartWalletContext'
 
 function App() {
@@ -12,8 +13,8 @@ function App() {
             Alchemy Relayer Demo
           </h1>
           <p className="text-slate-400 text-sm">
-            领取 USDC 测试币 
-            <a href="https://faucet.circle.com" target="_blank" className="text-blue-400 hover:text-blue-300 ml-1">https://faucet.circle.com</a> 
+            USDC 测试币：
+            <a href="https://faucet.circle.com" target="_blank" className="text-blue-400 hover:text-blue-300 ml-1">faucet.circle.com</a>
           </p>
           <p className="text-orange-400 text-sm whitespace-pre-wrap">
             {'Demo 运行在 Ethereum Sepolia 网络'}
@@ -32,7 +33,13 @@ function App() {
           <div className="h-px bg-linear-to-r from-transparent via-slate-700 to-transparent" />
 
           {/* Step 2: USDC Transfer */}
-          <UsdcTransfer />
+          <TokenTransfer token={USDC} step={2} />
+
+          {/* Divider */}
+          <div className="h-px bg-linear-to-r from-transparent via-slate-700 to-transparent" />
+
+          {/* Step 3: USDT Transfer */}
+          <TokenTransfer token={USDT} step={3} />
         </div>
 
         {/* Footer */}

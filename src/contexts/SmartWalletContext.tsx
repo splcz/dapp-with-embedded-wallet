@@ -30,8 +30,6 @@ export function SmartWalletProvider({ children }: { children: ReactNode }) {
   }, [eoaAddress, checkDelegation])
 
   useEffect(() => {
-    console.log('[SmartWallet 7702] useEffect triggered:', { isConnected, eoaAddress, hasPublicClient: !!publicClient })
-
     if (!eoaAddress) {
       setIsDelegated(false)
       setError(null)
