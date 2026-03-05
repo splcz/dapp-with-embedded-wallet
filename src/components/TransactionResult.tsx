@@ -13,7 +13,7 @@ export function TransactionResult({ txStatus, txHash }: { txStatus: TxStatus; tx
         </div>
         <p className="text-xs text-slate-400 font-mono break-all mb-2">{txHash}</p>
         <a
-          href={`https://sepolia.etherscan.io/tx/${txHash}`}
+          href={`https://etherscan.io/tx/${txHash}`}
           target="_blank"
           rel="noopener noreferrer"
           className="text-xs text-blue-400 hover:text-blue-300"

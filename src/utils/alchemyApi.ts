@@ -111,3 +111,35 @@ export interface CallsStatusResult {
 export async function getCallsStatus(callId: string) {
   return alchemyRpc<CallsStatusResult>('wallet_getCallsStatus', [callId])
 }
+
+// --- wallet_requestQuote_v0 (Swap) ---
+
+export interface SwapQuoteParams {
+  from: string
+  chainId: string
+  fromToken: string
+  toToken: string
+  fromAmount?: string
+  minimumToAmount?: string
+  returnRawCalls?: boolean
+  postCalls?: Array<{ to: string; data: string; value: string }>
+  capabilities?: {
+    paymasterService?: { policyId: string }
+  }
+}
+
+export interface SwapQuote {
+  expiry: string
+  minimumToAmount: string
+  fromAmount: string
+}
+
+export interface SwapQuoteResult {
+  rawCalls: boolean
+  quote: SwapQuote
+  calls?: Array<{ to: string; data: string; value: string }>
+}
+
+export async function requestQuote(params: SwapQuoteParams) {
+  return alchemyRpc<SwapQuoteResult>('wallet_requestQuote_v0', [params])
+}

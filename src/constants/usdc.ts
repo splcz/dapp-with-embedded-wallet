@@ -1,6 +1,6 @@
 import { type Address, type Hex, formatUnits, decodeFunctionData } from 'viem'
 
-export const USDC_ADDRESS = '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238' as Address
+export const USDC_ADDRESS = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' as Address
 
 export const USDC_ABI = [
   {
@@ -39,14 +39,23 @@ export const USDC_ABI = [
     ],
     outputs: [],
   },
+  {
+    name: 'transfer',
+    type: 'function',
+    inputs: [
+      { name: 'to', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+    ],
+    outputs: [{ type: 'bool' }],
+  },
 ] as const
 
-export const SEPOLIA_CHAIN_ID = '0xaa36a7' // 11155111
+export const CHAIN_ID = '0x1' // Ethereum mainnet
 
 export const PERMIT_DOMAIN = {
-  name: 'USDC',
+  name: 'USD Coin',
   version: '2',
-  chainId: 11155111,
+  chainId: 1,
   verifyingContract: USDC_ADDRESS,
 } as const
 

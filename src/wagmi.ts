@@ -1,16 +1,16 @@
 import { createConfig, http } from 'wagmi'
-import { sepolia } from 'wagmi/chains'
+import { mainnet } from 'wagmi/chains'
 import { injected } from 'wagmi/connectors'
 
-// const sepoliaRpcUrl = import.meta.env.VITE_ALCHEMY_API_KEY
-//   ? `https://eth-sepolia.g.alchemy.com/v2/${import.meta.env.VITE_ALCHEMY_API_KEY}`
-//   : undefined
+const mainnetRpcUrl = import.meta.env.VITE_ALCHEMY_API_KEY
+  ? `https://eth-mainnet.g.alchemy.com/v2/${import.meta.env.VITE_ALCHEMY_API_KEY}`
+  : undefined
 
 export const config = createConfig({
-  chains: [sepolia],
+  chains: [mainnet],
   connectors: [injected()],
   transports: {
-    [sepolia.id]: http(),
+    [mainnet.id]: http(mainnetRpcUrl),
   },
 })
 

@@ -3,68 +3,118 @@ import { usePublicClient, useConnection } from 'wagmi'
 import { getWalletClient } from 'wagmi/actions'
 import { config } from '../wagmi'
 import { useSmartWallet } from './useSmartWallet'
-import { type Address, type Hex, parseUnits, formatUnits, encodeFunctionData, parseSignature } from 'viem'
+import { type Address, type Hex, parseUnits, formatUnits, encodeFunctionData } from 'viem'
 import {
+  requestQuote,
   prepareCalls,
   sendPreparedCalls,
   getCallsStatus,
   type PrepareCallsParams,
   type UserOperationItem,
   type SignedUserOperation,
+  type SwapQuote,
 } from '../utils/alchemyApi'
-import {
-  USDC_ADDRESS,
-  USDC_ABI,
-  CHAIN_ID,
-  PERMIT_DOMAIN,
-  PERMIT_TYPES,
-  decodeUsdcCall,
-  type DecodedCall,
-} from '../constants/usdc'
+import { USDC_ADDRESS, USDC_ABI, CHAIN_ID } from '../constants/usdc'
+import { USDT_ADDRESS, USDT_ABI } from '../constants/usdt'
 
 export type TxStatus = 'idle' | 'preparing' | 'confirming' | 'sending' | 'success' | 'error'
 
-export function useUsdcTransfer() {
+export function useUsdtSwapTransfer() {
   const { connector } = useConnection()
   const publicClient = usePublicClient()
   const { scaAddress, eoaAddress, isScaDeployed, refreshScaStatus } = useSmartWallet()
 
-  const [recipient, setRecipient] = useState('0xd1122C8c941fE716C8b0C57b832c90acB4401a05')
-  const [amount, setAmount] = useState('1')
-  const [eoaBalance, setEoaBalance] = useState('0')
+  const [recipient, setRecipient] = useState('')
+  const [amount, setAmount] = useState('')
+  const [usdtBalance, setUsdtBalance] = useState('0')
+  const [allowance, setAllowance] = useState(0n)
   const [loading, setLoading] = useState(false)
+  const [approving, setApproving] = useState(false)
   const [error, setError] = useState('')
   const [txStatus, setTxStatus] = useState<TxStatus>('idle')
   const [txHash, setTxHash] = useState<Hex | null>(null)
   const [pendingOp, setPendingOp] = useState<UserOperationItem | null>(null)
+  const [swapQuote, setSwapQuote] = useState<SwapQuote | null>(null)
 
   useEffect(() => {
-    if (!publicClient || !eoaAddress) return
+    if (!publicClient || !eoaAddress || !scaAddress) return
 
-    const fetchBalance = async () => {
+    const fetch = async () => {
       try {
-        const balance = await publicClient.readContract({
-          address: USDC_ADDRESS,
-          abi: USDC_ABI,
-          functionName: 'balanceOf',
-          args: [eoaAddress],
-        }) as bigint
-        setEoaBalance(formatUnits(balance, 6))
+        const [bal, alw] = await Promise.all([
+          publicClient.readContract({
+            address: USDT_ADDRESS,
+            abi: USDT_ABI,
+            functionName: 'balanceOf',
+            args: [eoaAddress],
+          }) as Promise<bigint>,
+          publicClient.readContract({
+            address: USDT_ADDRESS,
+            abi: USDT_ABI,
+            functionName: 'allowance',
+            args: [eoaAddress, scaAddress],
+          }) as Promise<bigint>,
+        ])
+        setUsdtBalance(formatUnits(bal, 6))
+        setAllowance(alw)
       } catch (err) {
-        console.error('Failed to fetch balance:', err)
+        console.error('Failed to fetch USDT balance/allowance:', err)
       }
     }
 
-    fetchBalance()
-    const interval = setInterval(fetchBalance, 10000)
+    fetch()
+    const interval = setInterval(fetch, 10000)
     return () => clearInterval(interval)
-  }, [publicClient, eoaAddress])
+  }, [publicClient, eoaAddress, scaAddress])
+
+  const needsApproval = useCallback((usdtAmount: string) => {
+    if (!usdtAmount || !scaAddress) return false
+    try {
+      return allowance < parseUnits(usdtAmount, 6)
+    } catch {
+      return false
+    }
+  }, [allowance, scaAddress])
+
+  const approveUsdt = useCallback(async () => {
+    if (!connector || !eoaAddress || !scaAddress) return
+
+    setApproving(true)
+    setError('')
+    try {
+      const wc = await getWalletClient(config, { connector })
+      const maxAmount = parseUnits('1000000000', 6)
+
+      // USDT requires setting to 0 first if current allowance > 0
+      if (allowance > 0n) {
+        await wc.writeContract({
+          address: USDT_ADDRESS,
+          abi: USDT_ABI,
+          functionName: 'approve',
+          args: [scaAddress, 0n],
+        })
+      }
+
+      await wc.writeContract({
+        address: USDT_ADDRESS,
+        abi: USDT_ABI,
+        functionName: 'approve',
+        args: [scaAddress, maxAmount],
+      })
+
+      setAllowance(maxAmount)
+    } catch (err) {
+      console.error('Approve failed:', err)
+      setError(err instanceof Error ? err.message : '授权失败')
+    } finally {
+      setApproving(false)
+    }
+  }, [connector, eoaAddress, scaAddress, allowance])
 
   const signUserOperation = useCallback(async (
     item: UserOperationItem,
   ): Promise<SignedUserOperation> => {
     const wc = await getWalletClient(config, { connector })
-
     const { signatureRequest } = item
     let signature: Hex
 
@@ -102,24 +152,21 @@ export function useUsdcTransfer() {
     const MAX_POLLS = 60
     for (let i = 0; i < MAX_POLLS; i++) {
       const status = await getCallsStatus(callId)
-
       if (status.status === 200) {
         if (!status.receipts?.length || status.receipts[0].status !== '0x1') {
           throw new Error('Transaction reverted')
         }
         return status.receipts[0].transactionHash
       }
-
       if (status.status >= 400) {
         throw new Error(`Transaction failed with status ${status.status}`)
       }
-
       await new Promise(resolve => setTimeout(resolve, 2000))
     }
     throw new Error('Transaction timed out')
   }, [])
 
-  const prepareTransfer = useCallback(async () => {
+  const prepareSwapTransfer = useCallback(async () => {
     if (!scaAddress || !publicClient || !eoaAddress || !recipient || !amount || !connector) return
 
     setLoading(true)
@@ -127,52 +174,56 @@ export function useUsdcTransfer() {
     setError('')
     setTxHash(null)
     setPendingOp(null)
+    setSwapQuote(null)
 
     try {
-      const walletClient = await getWalletClient(config, { connector })
-      const transferAmount = parseUnits(amount, 6)
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600)
+      const usdtAmount = parseUnits(amount, 6)
+      const usdtHex = `0x${usdtAmount.toString(16)}`
 
-      const nonce = await publicClient.readContract({
-        address: USDC_ADDRESS,
-        abi: USDC_ABI,
-        functionName: 'nonces',
-        args: [eoaAddress],
-      }) as bigint
-
-      const permitSignature = await walletClient.signTypedData({
-        account: walletClient.account!,
-        domain: PERMIT_DOMAIN,
-        types: PERMIT_TYPES,
-        primaryType: 'Permit',
-        message: {
-          owner: eoaAddress,
-          spender: scaAddress,
-          value: transferAmount,
-          nonce,
-          deadline,
+      // 1. Get swap quote with raw calls
+      const quoteResult = await requestQuote({
+        from: scaAddress,
+        chainId: CHAIN_ID,
+        fromToken: USDT_ADDRESS,
+        toToken: USDC_ADDRESS,
+        fromAmount: usdtHex,
+        returnRawCalls: true,
+        capabilities: {
+          paymasterService: {
+            policyId: import.meta.env.VITE_ALCHEMY_POLICY_ID,
+          },
         },
       })
 
-      const { r, s, v } = parseSignature(permitSignature)
+      console.log('[swap] Quote:', quoteResult.quote)
+      setSwapQuote(quoteResult.quote)
 
-      const permitData = encodeFunctionData({
-        abi: USDC_ABI,
-        functionName: 'permit',
-        args: [eoaAddress, scaAddress, transferAmount, deadline, Number(v), r, s],
-      })
+      if (!quoteResult.calls?.length) {
+        throw new Error('Swap API returned no calls')
+      }
 
-      const transferFromData = encodeFunctionData({
-        abi: USDC_ABI,
+      // 2. Build combined calls: pull USDT from EOA → swap → transfer USDC to recipient
+      const pullUsdtData = encodeFunctionData({
+        abi: USDT_ABI,
         functionName: 'transferFrom',
-        args: [eoaAddress, recipient as Address, transferAmount],
+        args: [eoaAddress, scaAddress, usdtAmount],
       })
 
+      const transferUsdcData = encodeFunctionData({
+        abi: USDC_ABI,
+        functionName: 'transfer',
+        args: [recipient as Address, BigInt(quoteResult.quote.minimumToAmount)],
+      })
+
+      const combinedCalls = [
+        { to: USDT_ADDRESS as string, data: pullUsdtData, value: '0x0' },
+        ...quoteResult.calls,
+        { to: USDC_ADDRESS as string, data: transferUsdcData, value: '0x0' },
+      ]
+
+      // 3. Prepare UserOp
       const prepareParams: PrepareCallsParams = {
-        calls: [
-          { to: USDC_ADDRESS, data: permitData, value: '0x0' },
-          { to: USDC_ADDRESS, data: transferFromData, value: '0x0' },
-        ],
+        calls: combinedCalls,
         from: scaAddress,
         chainId: CHAIN_ID,
         capabilities: {
@@ -186,7 +237,7 @@ export function useUsdcTransfer() {
       setPendingOp(prepared)
       setTxStatus('confirming')
     } catch (err) {
-      console.error('Prepare failed:', err)
+      console.error('Prepare swap failed:', err)
       setError(err instanceof Error ? err.message : '准备交易失败')
       setTxStatus('error')
     } finally {
@@ -224,28 +275,30 @@ export function useUsdcTransfer() {
 
   const cancelConfirm = useCallback(() => {
     setPendingOp(null)
+    setSwapQuote(null)
     setTxStatus('idle')
     setError('')
   }, [])
-
-  const decodedCalls: DecodedCall[] = pendingOp?.details?.data.calls.map(decodeUsdcCall) ?? []
 
   return {
     eoaAddress,
     scaAddress,
     isScaDeployed,
-    eoaBalance,
+    usdtBalance,
     recipient,
     setRecipient,
     amount,
     setAmount,
     loading,
+    approving,
     error,
     txStatus,
     txHash,
     pendingOp,
-    decodedCalls,
-    prepareTransfer,
+    swapQuote,
+    needsApproval,
+    approveUsdt,
+    prepareSwapTransfer,
     confirmAndSend,
     cancelConfirm,
   }
