@@ -21,31 +21,35 @@ export function SwapTransfer() {
     scaAddress,
     isScaDeployed,
     balance,
-    scaEthBalance,
+    wethBalance,
     recipient,
     setRecipient,
     amount,
     setAmount,
+    wrapEthAmount,
+    setWrapEthAmount,
     loading,
     approving,
-    depositing,
+    wrapping,
     error,
     txStatus,
     txHash,
     pendingOp,
     swapQuote,
+    needsWrap,
     needsApproval,
-    needsDeposit,
+    wrapAndApprove,
     approveToken,
-    depositEth,
     prepareSwapTransfer,
     confirmAndSend,
     cancelConfirm,
   } = useSwapTransfer(selectedToken)
 
-  const showApprove = !selectedToken.isNative && amount && needsApproval(amount)
-  const showDeposit = selectedToken.isNative && amount && needsDeposit(amount)
-  const canSubmit = amount && parseFloat(amount) > 0 && parseFloat(balance) >= parseFloat(amount) && !showApprove && !showDeposit
+  const showWrap = selectedToken.isNative && needsWrap
+  const showApprove = !selectedToken.isNative && needsApproval
+  const canSubmit = amount && parseFloat(amount) > 0 && !showApprove && !(selectedToken.isNative && needsWrap)
+
+  const displayDecimals = selectedToken.isNative ? 18 : selectedToken.decimals
 
   return (
     <div className="p-6">
@@ -55,7 +59,7 @@ export function SwapTransfer() {
         </div>
         <div>
           <h2 className="text-lg font-semibold text-white">Swap → USDC 转账</h2>
-          <p className="text-xs text-slate-500">选择代币 Swap 为 USDC 后转给接收方，Gas 由 Alchemy 赞助</p>
+          <p className="text-xs text-slate-500">输入收款方期望的 USDC 金额，自动计算所需 {selectedToken.symbol}</p>
         </div>
       </div>
 
@@ -76,9 +80,9 @@ export function SwapTransfer() {
               <p className="text-lg text-white font-semibold mt-1">
                 {balance} {selectedToken.symbol}
               </p>
-              {selectedToken.isNative && scaAddress && (
+              {selectedToken.isNative && (
                 <p className="text-xs text-slate-500 mt-0.5">
-                  SCA 内 ETH 余额: {scaEthBalance} ETH
+                  可用 WETH: {wethBalance}（已包装，可直接用于 swap）
                 </p>
               )}
             </div>
@@ -101,25 +105,24 @@ export function SwapTransfer() {
               <div className="p-4 bg-amber-500/10 rounded-xl border border-amber-500/30 space-y-3">
                 <h3 className="text-sm font-semibold text-amber-400">确认 Swap & 转账</h3>
 
-                {/* Quote */}
                 <div className="p-3 bg-emerald-500/10 rounded-lg border border-emerald-500/30 space-y-1">
                   <p className="text-xs text-emerald-400 font-medium">Swap 报价</p>
                   <div className="flex justify-between text-xs">
-                    <span className="text-slate-400">支出</span>
+                    <span className="text-slate-400">需消耗</span>
                     <span className="text-white">
-                      {formatUnits(BigInt(swapQuote.fromAmount), selectedToken.decimals)} {selectedToken.symbol}
+                      {formatUnits(BigInt(swapQuote.fromAmount), displayDecimals)} {selectedToken.symbol}
                     </span>
                   </div>
                   <div className="flex justify-between text-xs">
-                    <span className="text-slate-400">最少获得</span>
-                    <span className="text-white">
-                      {formatUnits(BigInt(swapQuote.minimumToAmount), 6)} USDC
+                    <span className="text-slate-400">收款方获得</span>
+                    <span className="text-white font-medium">
+                      {amount} USDC
                     </span>
                   </div>
                   <div className="flex justify-between text-xs">
                     <span className="text-slate-400">汇率</span>
                     <span className="text-emerald-300">
-                      1 {selectedToken.symbol} ≈ {computeRate(swapQuote, selectedToken.decimals)} USDC
+                      1 {selectedToken.symbol} ≈ {computeRate(swapQuote, displayDecimals)} USDC
                     </span>
                   </div>
                   <div className="flex justify-between text-xs">
@@ -130,13 +133,10 @@ export function SwapTransfer() {
                   </div>
                 </div>
 
-                {/* Recipient */}
                 <div className="p-3 bg-slate-800/80 rounded-lg border border-slate-700/50">
                   <p className="text-xs text-slate-400 mb-1">接收方</p>
                   <p className="text-sm text-white font-mono">{shortenAddress(recipient)}</p>
-                  <p className="text-xs text-slate-500 mt-1">
-                    将收到至少 {formatUnits(BigInt(swapQuote.minimumToAmount), 6)} USDC
-                  </p>
+                  <p className="text-xs text-slate-500 mt-1">将收到 {amount} USDC</p>
                 </div>
 
                 {pendingOp.feePayment && (
@@ -171,11 +171,10 @@ export function SwapTransfer() {
               </div>
             </div>
           ) : (
-            /* Transfer Form */
             <>
               {/* Token selector */}
               <div>
-                <label className="block text-xs text-slate-400 mb-1">选择代币</label>
+                <label className="block text-xs text-slate-400 mb-1">使用代币</label>
                 <div className="flex gap-2">
                   {SWAP_TOKENS.map((t) => (
                     <button
@@ -206,7 +205,7 @@ export function SwapTransfer() {
 
               <div>
                 <label className="block text-xs text-slate-400 mb-1">
-                  {selectedToken.symbol} 数量（将 swap 为 USDC 后转出）
+                  收款方获得的 USDC 金额
                 </label>
                 <input
                   type="number"
@@ -214,12 +213,42 @@ export function SwapTransfer() {
                   onChange={(e) => setAmount(e.target.value)}
                   placeholder="0.00"
                   min="0"
-                  step={selectedToken.decimals <= 6 ? '0.01' : '0.001'}
+                  step="0.01"
                   className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
                 />
+                <p className="text-xs text-slate-600 mt-1">
+                  将自动从你的 {selectedToken.symbol} 余额中扣除等值数量
+                </p>
               </div>
 
-              {/* Approve (ERC-20 only) */}
+              {/* ETH: Wrap WETH & Approve */}
+              {showWrap && (
+                <div className="p-3 bg-blue-500/10 rounded-xl border border-blue-500/30 space-y-2">
+                  <p className="text-xs text-blue-400">
+                    首次使用 ETH swap 需先将 ETH 包装为 WETH 并授权 SCA（仅需一次）
+                  </p>
+                  <div className="flex gap-2">
+                    <input
+                      type="number"
+                      value={wrapEthAmount}
+                      onChange={(e) => setWrapEthAmount(e.target.value)}
+                      placeholder="要包装的 ETH 数量"
+                      min="0"
+                      step="0.01"
+                      className="flex-1 px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
+                    />
+                    <button
+                      onClick={wrapAndApprove}
+                      disabled={wrapping || !wrapEthAmount || parseFloat(wrapEthAmount) <= 0}
+                      className="px-4 py-2 bg-linear-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:from-slate-700 disabled:to-slate-700 disabled:text-slate-500 text-white text-sm font-medium rounded-lg transition-all whitespace-nowrap"
+                    >
+                      {wrapping ? <Spinner /> : 'Wrap & 授权'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* ERC-20: Approve */}
               {showApprove && (
                 <button
                   onClick={approveToken}
@@ -234,21 +263,6 @@ export function SwapTransfer() {
                 </button>
               )}
 
-              {/* Deposit ETH (native only) */}
-              {showDeposit && (
-                <button
-                  onClick={depositEth}
-                  disabled={depositing}
-                  className="w-full py-3 bg-linear-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:from-slate-700 disabled:to-slate-700 disabled:text-slate-500 text-white font-medium rounded-xl transition-all"
-                >
-                  {depositing ? (
-                    <span className="flex items-center justify-center gap-2">
-                      <Spinner /> 充值中...
-                    </span>
-                  ) : `充值 ${amount} ETH 到 SCA（EOA 支付 Gas）`}
-                </button>
-              )}
-
               {/* Swap & Transfer */}
               <button
                 onClick={prepareSwapTransfer}
@@ -260,15 +274,13 @@ export function SwapTransfer() {
                     <Spinner />
                     {txStatus === 'preparing' ? '获取报价...' : '处理中...'}
                   </span>
-                ) : `Swap ${amount || '0'} ${selectedToken.symbol} → USDC 并转账`}
+                ) : `用 ${selectedToken.symbol} 支付 ${amount || '0'} USDC`}
               </button>
 
               <div className="p-3 bg-blue-500/10 rounded-xl border border-blue-500/30">
                 <p className="text-xs text-blue-400">
-                  <strong>工作原理：</strong>
-                  {selectedToken.isNative
-                    ? ' 先将 ETH 充值到 SCA，再通过 Alchemy Swap API 兑换为 USDC 并转给接收方。Swap + 转账的 Gas 由 Alchemy 赞助，充值 ETH 需 EOA 支付少量 Gas。'
-                    : ` 通过 Alchemy Swap API 将 ${selectedToken.symbol} 兑换为 USDC 并转给接收方。整个过程在一笔 UserOp 中完成，Gas 由 Alchemy 赞助。首次使用需授权 SCA（EOA 支付少量 Gas）。`}
+                  <strong>工作原理：</strong> 输入收款方期望的 USDC 金额，Alchemy Swap API 自动计算所需的 {selectedToken.symbol} 数量并完成兑换 + 转账。
+                  Gas 由 Alchemy 赞助。
                 </p>
               </div>
             </>

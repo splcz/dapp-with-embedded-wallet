@@ -1,6 +1,6 @@
 import { type Address } from 'viem'
 
-export const NATIVE_TOKEN_ADDRESS = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'
+export const WETH_ADDRESS = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' as Address
 
 const ERC20_ABI = [
   {
@@ -39,9 +39,23 @@ const ERC20_ABI = [
   },
 ] as const
 
+export const WETH_ABI = [
+  ...ERC20_ABI,
+  {
+    name: 'deposit',
+    type: 'function',
+    inputs: [],
+    outputs: [],
+    stateMutability: 'payable',
+  },
+] as const
+
 export interface SwapToken {
   symbol: string
+  /** The ERC-20 contract address used for balance/allowance/transferFrom (WETH for ETH) */
   address: string
+  /** The token address sent to swap API (same as address for most tokens) */
+  swapAddress: string
   decimals: number
   isNative: boolean
   abi: typeof ERC20_ABI
@@ -52,6 +66,7 @@ export const SWAP_TOKENS: SwapToken[] = [
   {
     symbol: 'USDT',
     address: '0xdAC17F958D2ee523a2206206994597C13D831ec7' as Address,
+    swapAddress: '0xdAC17F958D2ee523a2206206994597C13D831ec7' as Address,
     decimals: 6,
     isNative: false,
     abi: ERC20_ABI,
@@ -59,7 +74,8 @@ export const SWAP_TOKENS: SwapToken[] = [
   },
   {
     symbol: 'ETH',
-    address: NATIVE_TOKEN_ADDRESS,
+    address: WETH_ADDRESS,
+    swapAddress: WETH_ADDRESS,
     decimals: 18,
     isNative: true,
     abi: ERC20_ABI,

@@ -15,7 +15,7 @@ import {
   type SwapQuote,
 } from '../utils/alchemyApi'
 import { USDC_ADDRESS, USDC_ABI, CHAIN_ID } from '../constants/usdc'
-import { type SwapToken } from '../constants/swapTokens'
+import { type SwapToken, WETH_ADDRESS, WETH_ABI } from '../constants/swapTokens'
 
 export type TxStatus = 'idle' | 'preparing' | 'confirming' | 'sending' | 'success' | 'error'
 
@@ -24,35 +24,50 @@ export function useSwapTransfer(token: SwapToken) {
   const publicClient = usePublicClient()
   const { scaAddress, eoaAddress, isScaDeployed, refreshScaStatus } = useSmartWallet()
 
-  const [recipient, setRecipient] = useState('')
+  const [recipient, setRecipient] = useState('0x4aD8C3db80ef9f384F8680d49d89E66aD8b22e49')
   const [amount, setAmount] = useState('')
-  const [balance, setBalance] = useState('0')
-  const [scaEthBalance, setScaEthBalance] = useState('0')
+  const [ethBalance, setEthBalance] = useState('0')
+  const [wethBalance, setWethBalance] = useState('0')
+  const [erc20Balance, setErc20Balance] = useState('0')
   const [allowance, setAllowance] = useState(0n)
   const [loading, setLoading] = useState(false)
   const [approving, setApproving] = useState(false)
-  const [depositing, setDepositing] = useState(false)
+  const [wrapping, setWrapping] = useState(false)
   const [error, setError] = useState('')
   const [txStatus, setTxStatus] = useState<TxStatus>('idle')
   const [txHash, setTxHash] = useState<Hex | null>(null)
   const [pendingOp, setPendingOp] = useState<UserOperationItem | null>(null)
   const [swapQuote, setSwapQuote] = useState<SwapQuote | null>(null)
 
-  // Fetch balance & allowance
+  const balance = token.isNative ? ethBalance : erc20Balance
+
+  // Fetch balances & allowance
   useEffect(() => {
     if (!publicClient || !eoaAddress) return
 
     const fetchData = async () => {
       try {
         if (token.isNative) {
-          const [eoaBal, scaBal] = await Promise.all([
+          const [ethBal, wBal, alw] = await Promise.all([
             publicClient.getBalance({ address: eoaAddress }),
+            publicClient.readContract({
+              address: WETH_ADDRESS,
+              abi: WETH_ABI,
+              functionName: 'balanceOf',
+              args: [eoaAddress],
+            }) as Promise<bigint>,
             scaAddress
-              ? publicClient.getBalance({ address: scaAddress as Address })
+              ? publicClient.readContract({
+                  address: WETH_ADDRESS,
+                  abi: WETH_ABI,
+                  functionName: 'allowance',
+                  args: [eoaAddress, scaAddress as Address],
+                }) as Promise<bigint>
               : Promise.resolve(0n),
           ])
-          setBalance(formatUnits(eoaBal, 18))
-          setScaEthBalance(formatUnits(scaBal, 18))
+          setEthBalance(formatUnits(ethBal, 18))
+          setWethBalance(formatUnits(wBal, 18))
+          setAllowance(alw)
         } else {
           const [bal, alw] = await Promise.all([
             publicClient.readContract({
@@ -70,7 +85,7 @@ export function useSwapTransfer(token: SwapToken) {
                 }) as Promise<bigint>
               : Promise.resolve(0n),
           ])
-          setBalance(formatUnits(bal, token.decimals))
+          setErc20Balance(formatUnits(bal, token.decimals))
           setAllowance(alw)
         }
       } catch (err) {
@@ -83,7 +98,6 @@ export function useSwapTransfer(token: SwapToken) {
     return () => clearInterval(interval)
   }, [publicClient, eoaAddress, scaAddress, token])
 
-  // Reset form state when switching tokens
   useEffect(() => {
     setAmount('')
     setPendingOp(null)
@@ -93,26 +107,65 @@ export function useSwapTransfer(token: SwapToken) {
     setTxHash(null)
   }, [token.symbol])
 
-  const needsApproval = useCallback((amt: string) => {
-    if (token.isNative || !amt || !scaAddress) return false
-    try {
-      return allowance < parseUnits(amt, token.decimals)
-    } catch {
-      return false
-    }
-  }, [token, allowance, scaAddress])
+  /** ETH: needs wrap if WETH balance is zero or very low */
+  const needsWrap = token.isNative && parseFloat(wethBalance) === 0
 
-  const needsDeposit = useCallback((amt: string) => {
-    if (!token.isNative || !amt) return false
-    try {
-      const needed = parseUnits(amt, 18)
-      const scaBal = parseUnits(scaEthBalance, 18)
-      return scaBal < needed
-    } catch {
-      return false
-    }
-  }, [token, scaEthBalance])
+  /** ERC-20 / WETH: needs approve if allowance is zero */
+  const needsApproval = allowance === 0n && !!scaAddress
 
+  const [wrapEthAmount, setWrapEthAmount] = useState('')
+
+  /** ETH: wrap ETH → WETH + approve SCA in one flow */
+  const wrapAndApprove = useCallback(async () => {
+    if (!token.isNative || !connector || !eoaAddress || !scaAddress || !wrapEthAmount) return
+
+    setWrapping(true)
+    setError('')
+    try {
+      const wc = await getWalletClient(config, { connector })
+      const wrapAmount = parseUnits(wrapEthAmount, 18)
+
+      await wc.writeContract({
+        address: WETH_ADDRESS,
+        abi: WETH_ABI,
+        functionName: 'deposit',
+        value: wrapAmount,
+      })
+
+      if (allowance === 0n) {
+        const maxAmount = parseUnits('1000000000', 18)
+        await wc.writeContract({
+          address: WETH_ADDRESS,
+          abi: WETH_ABI,
+          functionName: 'approve',
+          args: [scaAddress as Address, maxAmount],
+        })
+        setAllowance(maxAmount)
+      }
+
+      // Refresh balances
+      if (publicClient) {
+        const [newEthBal, newWethBal] = await Promise.all([
+          publicClient.getBalance({ address: eoaAddress }),
+          publicClient.readContract({
+            address: WETH_ADDRESS,
+            abi: WETH_ABI,
+            functionName: 'balanceOf',
+            args: [eoaAddress],
+          }) as Promise<bigint>,
+        ])
+        setEthBalance(formatUnits(newEthBal, 18))
+        setWethBalance(formatUnits(newWethBal, 18))
+      }
+    } catch (err) {
+      console.error('Wrap & approve failed:', err)
+      setError(err instanceof Error ? err.message : 'Wrap 失败')
+    } finally {
+      setWrapping(false)
+    }
+  }, [token, connector, eoaAddress, scaAddress, wrapEthAmount, allowance, publicClient])
+
+  /** ERC-20: one-time approve */
   const approveToken = useCallback(async () => {
     if (token.isNative || !connector || !eoaAddress || !scaAddress) return
 
@@ -146,33 +199,6 @@ export function useSwapTransfer(token: SwapToken) {
       setApproving(false)
     }
   }, [token, connector, eoaAddress, scaAddress, allowance])
-
-  const depositEth = useCallback(async () => {
-    if (!token.isNative || !connector || !scaAddress || !amount) return
-
-    setDepositing(true)
-    setError('')
-    try {
-      const wc = await getWalletClient(config, { connector })
-      const depositAmount = parseUnits(amount, 18)
-
-      await wc.sendTransaction({
-        to: scaAddress as Address,
-        value: depositAmount,
-      })
-
-      // Refresh SCA balance
-      if (publicClient) {
-        const newBal = await publicClient.getBalance({ address: scaAddress as Address })
-        setScaEthBalance(formatUnits(newBal, 18))
-      }
-    } catch (err) {
-      console.error('Deposit failed:', err)
-      setError(err instanceof Error ? err.message : '充值失败')
-    } finally {
-      setDepositing(false)
-    }
-  }, [token, connector, scaAddress, amount, publicClient])
 
   const signUserOperation = useCallback(async (
     item: UserOperationItem,
@@ -240,15 +266,17 @@ export function useSwapTransfer(token: SwapToken) {
     setSwapQuote(null)
 
     try {
-      const tokenAmount = parseUnits(amount, token.decimals)
-      const hexAmount = `0x${tokenAmount.toString(16)}`
+      // amount is the desired USDC output (6 decimals)
+      const usdcAmount = parseUnits(amount, 6)
+      const usdcHex = `0x${usdcAmount.toString(16)}`
+      const contractAddress = token.isNative ? WETH_ADDRESS : token.address
 
       const quoteResult = await requestQuote({
         from: scaAddress,
         chainId: CHAIN_ID,
-        fromToken: token.address,
+        fromToken: token.swapAddress,
         toToken: USDC_ADDRESS,
-        fromAmount: hexAmount,
+        minimumToAmount: usdcHex,
         returnRawCalls: true,
         capabilities: {
           paymasterService: {
@@ -264,28 +292,37 @@ export function useSwapTransfer(token: SwapToken) {
         throw new Error('Swap API returned no calls')
       }
 
-      // Build combined calls
-      const preCalls: Array<{ to: string; data: string; value: string }> = []
+      const fromTokenDecimals = token.isNative ? 18 : token.decimals
+      const fromAmount = BigInt(quoteResult.quote.fromAmount)
 
-      if (!token.isNative) {
-        // ERC-20: pull tokens from EOA to SCA via transferFrom
-        const pullData = encodeFunctionData({
-          abi: token.abi,
-          functionName: 'transferFrom',
-          args: [eoaAddress, scaAddress as Address, tokenAmount],
-        })
-        preCalls.push({ to: token.address, data: pullData, value: '0x0' })
-      }
-      // For ETH: SCA already holds ETH from deposit, no preCalls needed
+      // Pull the exact fromAmount determined by the quote
+      const pullData = encodeFunctionData({
+        abi: token.abi,
+        functionName: 'transferFrom',
+        args: [eoaAddress, scaAddress as Address, fromAmount],
+      })
 
       const transferUsdcData = encodeFunctionData({
         abi: USDC_ABI,
         functionName: 'transfer',
-        args: [recipient as Address, BigInt(quoteResult.quote.minimumToAmount)],
+        args: [recipient as Address, usdcAmount],
       })
 
+      // Check if EOA has enough source tokens
+      const balInSourceToken = parseUnits(
+        token.isNative ? wethBalance : erc20Balance,
+        fromTokenDecimals,
+      )
+      if (balInSourceToken < fromAmount) {
+        const needed = formatUnits(fromAmount, fromTokenDecimals)
+        throw new Error(
+          `${token.isNative ? 'WETH' : token.symbol} 余额不足，需要 ${needed}，` +
+          `当前 ${token.isNative ? wethBalance : erc20Balance}`
+        )
+      }
+
       const combinedCalls = [
-        ...preCalls,
+        { to: contractAddress as string, data: pullData, value: '0x0' },
         ...quoteResult.calls,
         { to: USDC_ADDRESS as string, data: transferUsdcData, value: '0x0' },
       ]
@@ -311,7 +348,7 @@ export function useSwapTransfer(token: SwapToken) {
     } finally {
       setLoading(false)
     }
-  }, [connector, scaAddress, publicClient, eoaAddress, recipient, amount, token])
+  }, [connector, scaAddress, publicClient, eoaAddress, recipient, amount, token, wethBalance, erc20Balance])
 
   const confirmAndSend = useCallback(async () => {
     if (!pendingOp) return
@@ -352,23 +389,25 @@ export function useSwapTransfer(token: SwapToken) {
     scaAddress,
     isScaDeployed,
     balance,
-    scaEthBalance,
+    wethBalance,
     recipient,
     setRecipient,
     amount,
     setAmount,
+    wrapEthAmount,
+    setWrapEthAmount,
     loading,
     approving,
-    depositing,
+    wrapping,
     error,
     txStatus,
     txHash,
     pendingOp,
     swapQuote,
+    needsWrap,
     needsApproval,
-    needsDeposit,
+    wrapAndApprove,
     approveToken,
-    depositEth,
     prepareSwapTransfer,
     confirmAndSend,
     cancelConfirm,
